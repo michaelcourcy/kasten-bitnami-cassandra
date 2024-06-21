@@ -1,0 +1,29 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: BlueprintBinding
+metadata:
+  name: cassandra-blueprint-binding
+spec:
+  blueprintRef:
+    name: cassandra-blueprint
+    namespace: kasten-io
+  resources:
+    matchAll:
+    - type:
+        operator: In
+        values:
+        - group: apps
+          resource: statefulsets
+    - annotations:
+        key: kanister.kasten.io/blueprint
+        operator: DoesNotExist
+    - labels:
+        key: app.kubernetes.io/managed-by
+        operator: In
+        values:
+        - Helm
+    - labels:
+        key: app.kubernetes.io/name
+        operator: In
+        values:
+        - cassandra
+

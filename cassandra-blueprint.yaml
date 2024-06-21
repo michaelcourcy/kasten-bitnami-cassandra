@@ -1,0 +1,212 @@
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: cassandra-blueprint
+actions:
+  backupPrehook:    
+    phases:
+    - func: KubeExec
+      name: waitForCassandraReady
+      args:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        pod: "{{ index .StatefulSet.Pods 0 }}"
+        command:
+          - bash
+          - -o
+          - pipefail
+          - -c
+          - | 
+            timeout=300
+            while true
+            do
+              VAR=$((cqlsh -u cassandra -p $CASSANDRA_PASSWORD -e "DESCRIBE keyspaces;" --request-timeout=300) 2>&1)
+              if [[ $VAR != *"Unable to connect to any servers"* ]]
+              then
+                break
+              fi
+              if [[ $timeout -le 0 ]]
+              then
+                 echo "Timed out waiting for cqlsh to configure.."
+                 exit 1
+              fi
+              sleep 2
+              timeout=$((timeout-2))
+            done
+            nodetool scrub  
+    - func: KubeExecAll
+      name: createBackupDirectory
+      args:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        pods: "{{ range .StatefulSet.Pods }} {{.}}{{end}}"
+        containers: "cassandra"
+        command:
+          - bash
+          - -o
+          - pipefail
+          - -c
+          - | 
+            snapshot_prefix=/bitnami/cassandra/cassandra_data/kanister_backups/${HOSTNAME}
+            if [ -d "${snapshot_prefix}" ]
+            then
+              rm -rf ${snapshot_prefix}
+              mkdir -p ${snapshot_prefix}           
+            else
+              mkdir -p ${snapshot_prefix}
+            fi                       
+    - func: KubeExec
+      name: captureSchema
+      args:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        pod: "{{ index .StatefulSet.Pods 0 }}"
+        command:
+          - bash
+          - -o
+          - pipefail
+          - -c
+          - | 
+            # we only capture schema on the first pod                       
+            snapshot_prefix=/bitnami/cassandra/cassandra_data/kanister_backups/${HOSTNAME}
+            cqlsh -u cassandra -p $CASSANDRA_PASSWORD -e "DESCRIBE SCHEMA" > ${snapshot_prefix}/schema.cql           
+    - func: KubeExecAll
+      name: takeSnapshots
+      args:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        pods: "{{ range .StatefulSet.Pods }} {{.}}{{end}}"
+        containers: "cassandra"
+        command:
+          - bash
+          - -o
+          - errexit
+          - -o
+          - xtrace
+          - -o
+          - pipefail
+          - -c
+          - |            
+            # Take the snapshot on each nodes
+            snapshot_prefix=/bitnami/cassandra/cassandra_data/kanister_backups/${HOSTNAME}
+            nodetool cleanup
+            nodetool clearsnapshot --all
+            nodetool snapshot -t ${HOSTNAME}
+            # copy the snapshot to the snapshot directory if there is something else than system keyspace
+            cd /bitnami/cassandra/data/data/
+            if [ -n "$(ls -A | grep -v  -w "system" | grep -v  -w "system_traces")" ]
+            then
+              cp -rf `ls -A | grep -v  -w "system" | grep -v  -w "system_traces"` ${snapshot_prefix}/
+            fi  
+            nodetool clearsnapshot --all
+            nodetool scrub    
+            # in a backup prehook the backup is not started until the prehook is finished
+            # but because it is very close to the snapshot depending of the storage technologies used
+            # the files we have created may not be included in the snapshot
+            # so we need to wait a little bit and sync the file system
+            sync
+            sleep 4 
+  backupPosthook:    
+    phases:
+    - func: KubeExecAll
+      name: noOp
+      args:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        pods: "{{ range .StatefulSet.Pods }} {{.}}{{end}}"
+        containers: "cassandra"
+        command:
+          - bash
+          - -o
+          - errexit
+          - -o
+          - xtrace
+          - -o
+          - pipefail
+          - -c
+          - | 
+            echo noop
+  restore:    
+    phases:
+    - func: KubeExec
+      name: waitForCassandraReady
+      args:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        pod: "{{ index .StatefulSet.Pods 0 }}"
+        command:
+          - bash
+          - -o
+          - pipefail
+          - -c
+          - | 
+            timeout=300
+            while true
+            do
+              VAR=$((cqlsh -u cassandra -p $CASSANDRA_PASSWORD -e "DESCRIBE keyspaces;" --request-timeout=300) 2>&1)
+              if [[ $VAR != *"Unable to connect to any servers"* ]]
+              then
+                break
+              fi
+              if [[ $timeout -le 0 ]]
+              then
+                 echo "Timed out waiting for cqlsh to configure.."
+                 exit 1
+              fi
+              sleep 2
+              timeout=$((timeout-2))
+            done
+            nodetool scrub
+    - func: KubeExec
+      name: recreateSchema
+      args:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        pod: "{{ index .StatefulSet.Pods 0 }}"
+        command:
+          - bash
+          - -o
+          - pipefail
+          - -c
+          - | 
+            # we only recreate schema on the first pod                       
+            snapshot_prefix=/bitnami/cassandra/cassandra_data/kanister_backups/${HOSTNAME}
+            rm -rf ${snapshot_prefix}/\?/
+            if [ -n "$(ls ${snapshot_prefix}/)" ]
+            then
+              # Drop all keyspaces except system keyspaces
+              allkeyspaces=$(cqlsh -u cassandra -p $CASSANDRA_PASSWORD -e "DESCRIBE keyspaces" --request-timeout=300)
+              keyspacestodel=$(echo $allkeyspaces | xargs -n1 echo | grep -v ^system || true)
+              for ks in $keyspacestodel; do
+                cqlsh -u cassandra -p $CASSANDRA_PASSWORD -e "drop keyspace if exists $ks;" --request-timeout=300
+              done
+              # recreate the schema
+              cqlsh -u cassandra -p $CASSANDRA_PASSWORD -e "$(cat ${snapshot_prefix}/schema.cql)" --request-timeout=300
+              rm ${snapshot_prefix}/schema.cql
+            fi    
+    - func: KubeExecAll
+      name: restoreSnapshots
+      args:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        pods: "{{ range .StatefulSet.Pods }} {{.}}{{end}}"
+        containers: "cassandra"
+        command:
+          - bash
+          - -o
+          - xtrace
+          - -o
+          - pipefail
+          - -o
+          - errexit
+          - -c
+          - |
+            snapshot_prefix=/bitnami/cassandra/cassandra_data/kanister_backups/${HOSTNAME}
+            rm -rf ${snapshot_prefix}/\?/
+            if [ -n "$(ls ${snapshot_prefix}/)" ]
+            then              
+              list="$(ls -d ${snapshot_prefix}/*)"
+              cp -r ${snapshot_prefix}/. /bitnami/cassandra/data/data/
+              cd /bitnami/cassandra/data/data/
+              for keyspace in $list
+              do
+                cd $keyspace
+                for table in *
+                do
+                  sstableloader -u cassandra -pw $CASSANDRA_PASSWORD -d ${HOSTNAME} $table/ 
+                done
+                cd ..
+              done
+            fi
