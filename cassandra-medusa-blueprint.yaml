@@ -149,5 +149,5 @@ actions:
 apiVersion: cr.kanister.io/v1alpha1
 kind: Blueprint
 metadata:
-  name: cassandra-medusa-bp
+  name: cassandra-medusa-blueprint
   namespace: kasten-io
