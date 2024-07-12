@@ -1,0 +1,153 @@
+actions:
+  backup:
+    kind: ""
+    name: ""
+    outputArtifacts:
+      backupInfo:
+        keyValue:
+          apiVersion: '{{ .Phases.createCassandraBackup.Output.apiVersion }}'
+          group: '{{ .Phases.createCassandraBackup.Output.group }}'
+          name: '{{ .Phases.createCassandraBackup.Output.name }}'
+          namespace: '{{ .Phases.createCassandraBackup.Output.namespace }}'
+          resource: '{{ .Phases.createCassandraBackup.Output.resource }}'
+    phases:
+    - args:
+        namespace: '{{ .Object.metadata.namespace }}'
+        operation: create
+        spec: |-
+          apiVersion: medusa.k8ssandra.io/v1alpha1
+          kind: MedusaBackupJob
+          metadata:
+            name: k10-{{ .Object.spec.clusterName }}-{{ .Object.metadata.name }}-{{ toDate "2006-01-02T15:04:05.999999999Z07:00" .Time  | date "2006-01-02t15-04-05" }}
+          spec:
+            cassandraDatacenter: "{{ .Object.metadata.name }}"
+      func: KubeOps
+      name: createCassandraBackup
+    - args:
+        conditions:
+          anyOf:
+          - condition: |-
+              {{ if .status.finishTime }}
+                {{ if .status.finished }}
+                  true
+                {{ end }}
+              {{ else }}
+                false
+              {{ end }}
+            objectReference:
+              apiVersion: '{{ .Phases.createCassandraBackup.Output.apiVersion }}'
+              group: '{{ .Phases.createCassandraBackup.Output.group }}'
+              kind: ""
+              name: '{{ .Phases.createCassandraBackup.Output.name }}'
+              namespace: '{{ .Phases.createCassandraBackup.Output.namespace }}'
+              resource: '{{ .Phases.createCassandraBackup.Output.resource }}'
+        timeout: 45m
+      func: WaitV2
+      name: waitCassandraBackupComplete
+  delete:
+    inputArtifactNames:
+    - backupInfo
+    kind: ""
+    name: ""
+    phases:
+    - args:
+        objectReference:
+          apiVersion: '{{ .ArtifactsIn.backupInfo.KeyValue.apiVersion }}'
+          group: '{{ .ArtifactsIn.backupInfo.KeyValue.group }}'
+          kind: ""
+          name: '{{ .ArtifactsIn.backupInfo.KeyValue.name }}'
+          namespace: '{{ .ArtifactsIn.backupInfo.KeyValue.namespace }}'
+          resource: '{{ .ArtifactsIn.backupInfo.KeyValue.resource }}'
+        operation: delete
+      func: KubeOps
+      name: cassandraBackupDelete
+  restore:
+    inputArtifactNames:
+    - backupInfo
+    kind: ""
+    name: ""
+    phases:
+    - args:
+        namespace: '{{ .Object.metadata.namespace }}'
+        operation: create
+        spec: |-
+          apiVersion: medusa.k8ssandra.io/v1alpha1
+          kind: MedusaTask
+          metadata:
+            name: medusabackupsync-{{ toDate "2006-01-02T15:04:05.999999999Z07:00" .Time  | date "2006-01-02t15-04-05" }}
+          spec:
+            cassandraDatacenter: "{{ .Object.metadata.name }}"
+            operation: sync
+      func: KubeOps
+      name: createMedusaBackupSync
+    - args:
+        conditions:
+          anyOf:
+            - condition: |-
+                {{ if .status.finishTime }}
+                  {{ if .status.finished }}
+                    true
+                  {{ end }}
+                {{ else }}
+                  false
+                {{ end }}
+              objectReference:
+                apiVersion: '{{ .Phases.createMedusaBackupSync.Output.apiVersion }}'
+                group: '{{ .Phases.createMedusaBackupSync.Output.group }}'
+                kind: ''
+                name: '{{ .Phases.createMedusaBackupSync.Output.name }}'
+                namespace: '{{ .Phases.createMedusaBackupSync.Output.namespace }}'
+                resource: '{{ .Phases.createMedusaBackupSync.Output.resource }}'
+        timeout: 45m            
+      func: WaitV2
+      name: waitMedusaBackupSync        
+    - args:
+        namespace: '{{ .Object.metadata.namespace }}'
+        operation: create
+        spec: |-
+          apiVersion: medusa.k8ssandra.io/v1alpha1
+          kind: MedusaRestoreJob
+          metadata:
+            name: restore-{{ toDate "2006-01-02T15:04:05.999999999Z07:00" .Time  | date "2006-01-02t15-04-05" }}
+          spec:
+            backup: {{ .ArtifactsIn.backupInfo.KeyValue.name }}
+            cassandraDatacenter: "{{ .Object.metadata.name }}"
+      func: KubeOps
+      name: createCassandraRestore
+    - args:
+        conditions:
+          anyOf:
+          - condition: |-
+              {{ if .status.finishTime }}
+                {{ if .status.restoreKey }}
+                  true
+                {{ end }}
+              {{ else }}
+                false
+              {{ end }}
+            objectReference:
+              apiVersion: '{{ .Phases.createCassandraRestore.Output.apiVersion }}'
+              group: '{{ .Phases.createCassandraRestore.Output.group }}'
+              kind: ""
+              name: '{{ .Phases.createCassandraRestore.Output.name }}'
+              namespace: '{{ .Phases.createCassandraRestore.Output.namespace }}'
+              resource: '{{ .Phases.createCassandraRestore.Output.resource }}'
+        timeout: 600m
+      func: WaitV2
+      name: waitCassandraRestoreComplete
+    - args:
+        objectReference:
+          apiVersion: '{{ .Phases.createCassandraRestore.Output.apiVersion }}'
+          group: '{{ .Phases.createCassandraRestore.Output.group }}'
+          kind: ""
+          name: '{{ .Phases.createCassandraRestore.Output.name }}'
+          namespace: '{{ .Phases.createCassandraRestore.Output.namespace }}'
+          resource: '{{ .Phases.createCassandraRestore.Output.resource }}'
+        operation: delete
+      func: KubeOps
+      name: cassandraRestoreDelete
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: cassandra-medusa-bp
+  namespace: kasten-io
